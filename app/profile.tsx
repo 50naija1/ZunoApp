@@ -1,22 +1,23 @@
 import * as ImagePicker from "expo-image-picker";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  ActivityIndicator,
-  Alert,
-  Dimensions,
-  Image,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    Image,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    ScrollView,
+    StatusBar,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
-import { useAuth } from "./context";
+import { useFocusEffect } from "@react-navigation/native";
+import { useAuth } from "../services/context";
 
 const API      = "https://zuno.ng/api";
 const BASE_URL = "https://zuno.ng";
@@ -55,7 +56,7 @@ const toUrl = (p?: string | null) => {
 const toRelPath = (url: string) =>
   url.startsWith(BASE_URL) ? url.replace(BASE_URL, "") : url;
 
-const fetchWithTimeout = async (url: string, options: any, ms = 8000) => {
+const fetchWithTimeout = async (url: string, options: any, ms = 12000) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -121,20 +122,19 @@ function PickerRow({ label, value, options, onChange }: {
 export default function ProfileScreen() {
   const { artisanData, artisanToken, logoutArtisan, refreshArtisanData } = useAuth();
 
-  const [editOpen,       setEditOpen]       = useState(false);
-  const [saving,         setSaving]         = useState(false);
-  const [uploadMsg,      setUploadMsg]      = useState<{ text: string; ok: boolean } | null>(null);
-  const [reviews,        setReviews]        = useState<Review[]>([]);
-  const [lbOpen,         setLbOpen]         = useState(false);
-  const [lbIndex,        setLbIndex]        = useState(0);
-  const [lbPhotos,       setLbPhotos]       = useState<string[]>([]);
-  const [pending,        setPending]        = useState<PendingPhoto[]>([]);
-  const [removedPhotos,  setRemovedPhotos]  = useState<string[]>([]);
-  const [newProfilePhoto, setNewProfilePhoto] = useState<PendingPhoto | null>(null);
+  const [editOpen,            setEditOpen]            = useState(false);
+  const [saving,              setSaving]              = useState(false);
+  const [uploadMsg,           setUploadMsg]           = useState<{ text: string; ok: boolean } | null>(null);
+  const [reviews,             setReviews]             = useState<Review[]>([]);
+  const [lbOpen,              setLbOpen]              = useState(false);
+  const [lbIndex,             setLbIndex]             = useState(0);
+  const [lbPhotos,            setLbPhotos]            = useState<string[]>([]);
+  const [pending,             setPending]             = useState<PendingPhoto[]>([]);
+  const [removedPhotos,       setRemovedPhotos]       = useState<string[]>([]);
+  const [newProfilePhoto,     setNewProfilePhoto]     = useState<PendingPhoto | null>(null);
   const [profilePhotoPreview, setProfilePhotoPreview] = useState<string>("");
-  // ✅ NEW: Hero image state
-  const [newHeroPhoto,   setNewHeroPhoto]   = useState<PendingPhoto | null>(null);
-  const [heroPreview,    setHeroPreview]    = useState<string>("");
+  const [newHeroPhoto,        setNewHeroPhoto]        = useState<PendingPhoto | null>(null);
+  const [heroPreview,         setHeroPreview]         = useState<string>("");
 
   const [form, setForm] = useState({
     full_name: "", phone: "", category: "", lga: "",
@@ -153,17 +153,20 @@ export default function ProfileScreen() {
     });
     setProfilePhotoPreview(toUrl(d?.profile_photo) || "");
     setNewProfilePhoto(null);
-    // ✅ Sync hero image preview
     setHeroPreview(toUrl(d?.hero_image) || "");
     setNewHeroPhoto(null);
   };
 
   useEffect(() => { syncForm(artisanData); }, [artisanData]);
 
-  useEffect(() => {
-    refreshArtisanData().catch(() => {});
-    loadReviews().catch(() => {});
-  }, []);
+  // ── CHANGED: useFocusEffect replaces useEffect so stats refresh
+  //    every time the artisan navigates to this tab ──────────────
+  useFocusEffect(
+    useCallback(() => {
+      refreshArtisanData().catch(() => {});
+      loadReviews().catch(() => {});
+    }, [artisanToken])
+  );
 
   const loadReviews = async () => {
     if (!artisanToken) return;
@@ -171,7 +174,7 @@ export default function ProfileScreen() {
       const res  = await fetchWithTimeout(
         `${API}/artisan/reviews`,
         { headers: { Authorization: `Bearer ${artisanToken}` } },
-        8000
+        12000
       );
       const data = await res.json();
       if (data.success && data.reviews) setReviews(data.reviews);
@@ -206,7 +209,6 @@ export default function ProfileScreen() {
     } catch {}
   };
 
-  // ✅ NEW: Pick hero/banner image
   const pickHeroPhoto = async () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -259,7 +261,6 @@ export default function ProfileScreen() {
         } as any);
       }
 
-      // ✅ Attach hero image if picked
       if (newHeroPhoto) {
         fd.append("hero_image", {
           uri:  Platform.OS === "android" ? newHeroPhoto.uri : newHeroPhoto.uri.replace("file://", ""),
@@ -270,7 +271,7 @@ export default function ProfileScreen() {
       const profileRes = await fetchWithTimeout(
         `${API}/artisan/profile`,
         { method: "PUT", headers: { Authorization: `Bearer ${artisanToken}` }, body: fd },
-        15000
+        18000
       );
       const profileRaw = await profileRes.text();
       let profileData: any = {};
@@ -350,7 +351,6 @@ export default function ProfileScreen() {
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 50 }}>
 
-        {/* Profile Card */}
         <View style={s.profileCard}>
           <View style={s.profileCardInner}>
             <View style={s.smallAvatarWrap}>
@@ -398,7 +398,6 @@ export default function ProfileScreen() {
           <Text style={s.editBtnTxt}>✏️  Edit Profile</Text>
         </TouchableOpacity>
 
-        {/* Account Details */}
         <View style={s.detailsCard}>
           <Text style={s.detailsTitle}>Account Details</Text>
           {[
@@ -459,7 +458,7 @@ export default function ProfileScreen() {
 
       </ScrollView>
 
-      {/* ── Edit Modal ── */}
+      {/* Edit Modal — unchanged */}
       <Modal visible={editOpen} transparent animationType="slide" onRequestClose={() => setEditOpen(false)}>
         <View style={em.overlay}>
           <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ width: "100%", maxHeight: SH * 0.93 }}>
@@ -471,10 +470,7 @@ export default function ProfileScreen() {
                   <Text style={{ color: MUTED, fontSize: 22 }}>✕</Text>
                 </TouchableOpacity>
               </View>
-
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
-
-                {/* ✅ Hero / Banner Image Picker */}
                 <View style={ps.heroWrap}>
                   <Text style={ps.fieldLabel}>BANNER / HERO IMAGE</Text>
                   <TouchableOpacity style={ps.heroBtn} onPress={pickHeroPhoto} activeOpacity={0.85}>
@@ -490,12 +486,8 @@ export default function ProfileScreen() {
                       <Text style={{ fontSize: 14 }}>📷</Text>
                     </View>
                   </TouchableOpacity>
-                  {newHeroPhoto && (
-                    <Text style={{ color: ORANGE, fontSize: 12, marginTop: 4 }}>✓ New banner selected</Text>
-                  )}
+                  {newHeroPhoto && <Text style={{ color: ORANGE, fontSize: 12, marginTop: 4 }}>✓ New banner selected</Text>}
                 </View>
-
-                {/* Profile Photo */}
                 <View style={ps.profilePhotoWrap}>
                   <TouchableOpacity style={ps.profilePhotoBtn} onPress={pickProfilePhoto} activeOpacity={0.8}>
                     {profilePhotoPreview
@@ -507,31 +499,26 @@ export default function ProfileScreen() {
                   <Text style={ps.profilePhotoHint}>Tap to change profile photo</Text>
                   {newProfilePhoto && <Text style={[ps.profilePhotoHint, { color: ORANGE, marginTop: 2 }]}>✓ New photo selected</Text>}
                 </View>
-
                 <PickerRow label="CATEGORY" value={form.category} options={CATEGORIES} onChange={(v) => setForm((p) => ({ ...p, category: v }))} />
                 <PickerRow label="LGA" value={form.lga} options={LGAS} onChange={(v) => setForm((p) => ({ ...p, lga: v }))} />
-
                 <View style={ps.fieldWrap}>
                   <Text style={ps.fieldLabel}>FULL NAME</Text>
                   <TextInput style={ps.input} value={form.full_name} autoCapitalize="words"
                     onChangeText={(v) => setForm((p) => ({ ...p, full_name: v }))}
                     placeholderTextColor={MUTED} placeholder="Your full name" />
                 </View>
-
                 <View style={ps.fieldWrap}>
                   <Text style={ps.fieldLabel}>PHONE NUMBER</Text>
                   <TextInput style={ps.input} value={form.phone} keyboardType="phone-pad"
                     onChangeText={(v) => setForm((p) => ({ ...p, phone: v }))}
                     placeholderTextColor={MUTED} placeholder="Your phone number" />
                 </View>
-
                 <View style={ps.fieldWrap}>
                   <Text style={ps.fieldLabel}>YEARS EXPERIENCE</Text>
                   <TextInput style={ps.input} value={form.years_experience} keyboardType="numeric"
                     onChangeText={(v) => setForm((p) => ({ ...p, years_experience: v }))}
                     placeholderTextColor={MUTED} placeholder="e.g. 5" />
                 </View>
-
                 <View style={ps.fieldWrap}>
                   <Text style={ps.fieldLabel}>BIO <Text style={{ color: MUTED, fontWeight: "400" }}>(optional)</Text></Text>
                   <TextInput style={[ps.input, { minHeight: 90, textAlignVertical: "top" }]}
@@ -539,15 +526,12 @@ export default function ProfileScreen() {
                     onChangeText={(v) => setForm((p) => ({ ...p, bio: v }))}
                     placeholderTextColor={MUTED} placeholder="Tell clients about yourself..." />
                 </View>
-
                 <View style={ps.fieldWrap}>
                   <Text style={ps.fieldLabel}>NEW PASSWORD <Text style={{ color: MUTED, fontWeight: "400" }}>(leave blank to keep)</Text></Text>
                   <TextInput style={ps.input} value={form.password} secureTextEntry
                     onChangeText={(v) => setForm((p) => ({ ...p, password: v }))}
                     placeholderTextColor={MUTED} placeholder="Min 6 characters" autoCapitalize="none" />
                 </View>
-
-                {/* Work Photos */}
                 <View style={ps.fieldWrap}>
                   <View style={ps.photoLabelRow}>
                     <Text style={ps.fieldLabel}>WORK PHOTOS</Text>
@@ -577,13 +561,11 @@ export default function ProfileScreen() {
                     </TouchableOpacity>
                   )}
                 </View>
-
                 {!!uploadMsg && (
                   <View style={[ps.msgBox, { borderColor: uploadMsg.ok ? GREEN : "#ff4444" }]}>
                     <Text style={[ps.msgTxt, { color: uploadMsg.ok ? GREEN : "#ff4444" }]}>{uploadMsg.text}</Text>
                   </View>
                 )}
-
                 <TouchableOpacity style={ps.saveBtn} onPress={saveProfile} disabled={saving}>
                   {saving
                     ? <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
@@ -593,21 +575,19 @@ export default function ProfileScreen() {
                     : <Text style={ps.saveBtnTxt}>Save Changes</Text>
                   }
                 </TouchableOpacity>
-
                 <TouchableOpacity style={ps.cancelBtn} onPress={() => {
                   setEditOpen(false); setPending([]); setRemovedPhotos([]);
                   setNewProfilePhoto(null); setNewHeroPhoto(null); setUploadMsg(null);
                 }}>
                   <Text style={ps.cancelBtnTxt}>Cancel</Text>
                 </TouchableOpacity>
-
               </ScrollView>
             </View>
           </KeyboardAvoidingView>
         </View>
       </Modal>
 
-      {/* Lightbox */}
+      {/* Lightbox — unchanged */}
       <Modal visible={lbOpen} transparent animationType="fade" onRequestClose={() => setLbOpen(false)}>
         <View style={s.lb}>
           <TouchableOpacity style={s.lbClose} onPress={() => setLbOpen(false)}>
@@ -696,14 +676,12 @@ const em = StyleSheet.create({
 });
 
 const ps = StyleSheet.create({
-  // Hero banner picker
   heroWrap:              { marginBottom: 16 },
   heroBtn:               { width: "100%", height: 140, borderRadius: 14, overflow: "hidden", position: "relative", borderWidth: 1, borderColor: BORDER },
   heroImg:               { width: "100%", height: "100%" },
   heroPlaceholder:       { width: "100%", height: "100%", backgroundColor: "#1e1e1e", alignItems: "center", justifyContent: "center" },
   heroHint:              { color: MUTED, fontSize: 13, marginTop: 6 },
   heroCameraOverlay:     { position: "absolute", bottom: 8, right: 8, width: 32, height: 32, borderRadius: 16, backgroundColor: "rgba(0,0,0,0.7)", borderWidth: 1, borderColor: ORANGE, alignItems: "center", justifyContent: "center" },
-  // Profile photo picker
   profilePhotoWrap:      { alignItems: "center", marginBottom: 24 },
   profilePhotoBtn:       { width: 90, height: 90, borderRadius: 45, overflow: "visible", position: "relative" },
   profilePhotoImg:       { width: 90, height: 90, borderRadius: 45, borderWidth: 3, borderColor: ORANGE },
@@ -711,7 +689,6 @@ const ps = StyleSheet.create({
   profilePhotoInitial:   { color: WHITE, fontSize: 34, fontWeight: "900" },
   cameraOverlay:         { position: "absolute", bottom: 0, right: 0, width: 28, height: 28, borderRadius: 14, backgroundColor: CARD, borderWidth: 2, borderColor: ORANGE, alignItems: "center", justifyContent: "center" },
   profilePhotoHint:      { color: MUTED, fontSize: 12, marginTop: 8 },
-  // Form
   fieldWrap:             { marginBottom: 20 },
   fieldLabel:            { color: MUTED, fontSize: 11, fontWeight: "800", letterSpacing: 1, marginBottom: 8 },
   input:                 { backgroundColor: "#1e1e1e", borderWidth: 1, borderColor: BORDER, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 13, color: WHITE, fontSize: 15 },
@@ -724,7 +701,6 @@ const ps = StyleSheet.create({
   pickerOptActive:       { backgroundColor: "rgba(255,92,26,0.06)", marginHorizontal: -20, paddingHorizontal: 20 },
   pickerOptTxt:          { color: WHITE, fontSize: 15 },
   pickerCancel:          { marginTop: 16, alignItems: "center", paddingVertical: 14 },
-  // Work photos
   photoLabelRow:         { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
   thumbGrid:             { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
   thumbWrap:             { width: THUMB, height: THUMB, borderRadius: 10, overflow: "hidden", backgroundColor: CARD2, position: "relative" },
@@ -732,7 +708,6 @@ const ps = StyleSheet.create({
   removeBtn:             { position: "absolute", top: 4, right: 4, width: 22, height: 22, borderRadius: 11, backgroundColor: "rgba(0,0,0,0.85)", alignItems: "center", justifyContent: "center", zIndex: 5 },
   addPhotoBtn:           { borderWidth: 2, borderColor: ORANGE, borderStyle: "dashed", borderRadius: 12, paddingVertical: 14, alignItems: "center", backgroundColor: "rgba(255,92,26,0.05)" },
   addPhotoBtnTxt:        { color: ORANGE, fontSize: 15, fontWeight: "700" },
-  // Buttons
   msgBox:                { borderWidth: 1, borderRadius: 10, padding: 12, marginBottom: 12, backgroundColor: "rgba(255,255,255,0.03)" },
   msgTxt:                { textAlign: "center", fontSize: 13, fontWeight: "600" },
   saveBtn:               { backgroundColor: ORANGE, borderRadius: 14, paddingVertical: 15, alignItems: "center", marginBottom: 10, minHeight: 52, justifyContent: "center" },

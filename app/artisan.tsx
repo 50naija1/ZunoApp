@@ -1,5 +1,8 @@
 import { Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Audio } from "expo-av";
+import * as ImagePicker from "expo-image-picker";
+import { useRouter } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -18,12 +21,11 @@ import {
   View
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { io as socketIO } from "socket.io-client";
-import { useAuth } from "./context";
-import { setupNotificationListeners, setupPushNotifications } from "./notifications";
+import { useAuth } from "../services/context";
+import { setupNotificationListeners, setupPushNotifications } from "../services/notificationService";
+import { socketService } from "../services/socketService";
 
-const API        = "https://zuno.ng/api";
-const SOCKET_URL = "https://zuno.ng";
+const API = "https://zuno.ng/api";
 
 const SKILLS = [
   "AC Technician","Electrician","Plumber","Cleaner","Carpenter",
@@ -44,13 +46,22 @@ const LGAS = [
 // ─── Beep ─────────────────────────────────────────────────────────────────────
 async function playBeep() {
   try {
-    await Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: true });
+    await Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+    });
     const { sound } = await Audio.Sound.createAsync(
       { uri: "https://zuno.ng/beep.wav" },
       { shouldPlay: true, volume: 1.0 }
     );
-    setTimeout(() => sound.unloadAsync().catch(() => {}), 3000);
-  } catch {}
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        sound.unloadAsync().catch(() => {});
+      }
+    });
+  } catch (e) {
+    console.warn("[Beep] Failed to play:", e);
+  }
 }
 
 // ─── Job Alert Popup ──────────────────────────────────────────────────────────
@@ -218,24 +229,116 @@ function NotificationBell({ alerts, onClose }: { alerts: any[]; onClose: () => v
   );
 }
 
+// ─── Support Menu ─────────────────────────────────────────────────────────────
+function SupportMenu({ visible, onClose, onLiveChat }: {
+  visible: boolean; onClose: () => void; onLiveChat: () => void;
+}) {
+  const items = [
+    {
+      icon: "help-circle-outline" as const,
+      label: "FAQ",
+      sub: "Frequently asked questions",
+      action: () => { onClose(); Linking.openURL("https://zuno.ng/help"); },
+    },
+    {
+      icon: "document-text-outline" as const,
+      label: "Terms & Conditions",
+      sub: "Our terms of use",
+      action: () => { onClose(); Linking.openURL("https://zuno.ng/terms"); },
+    },
+    {
+      icon: "chatbubble-ellipses-outline" as const,
+      label: "Live Chat Support",
+      sub: "Chat with our support team",
+      action: () => { onClose(); onLiveChat(); },
+    },
+    {
+      icon: "logo-whatsapp" as const,
+      label: "WhatsApp Support",
+      sub: "Message us on WhatsApp",
+      action: () => { onClose(); Linking.openURL("https://zuno.ng/whatsapp"); },
+    },
+  ];
+
+  return (
+    <Modal transparent animationType="fade" visible={visible} onRequestClose={onClose}>
+      <TouchableOpacity style={sm.overlay} activeOpacity={1} onPress={onClose}>
+        <View style={sm.sheet}>
+          <View style={sm.sheetHandle} />
+          <Text style={sm.sheetTitle}>How can we help?</Text>
+          {items.map((item, i) => (
+            <TouchableOpacity
+              key={i}
+              style={[sm.item, i === items.length - 1 && { borderBottomWidth: 0 }]}
+              onPress={item.action}
+              activeOpacity={0.75}>
+              <View style={[sm.iconBox, item.icon === "logo-whatsapp" && { backgroundColor: "rgba(37,211,102,0.12)" }]}>
+                <Ionicons
+                  name={item.icon}
+                  size={22}
+                  color={item.icon === "logo-whatsapp" ? "#25D366" : "#f97316"}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={sm.itemLabel}>{item.label}</Text>
+                <Text style={sm.itemSub}>{item.sub}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color="#444" />
+            </TouchableOpacity>
+          ))}
+        </View>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+// ─── Active Job Warning Modal ─────────────────────────────────────────────────
+function ActiveJobWarningModal({ visible, onStayOffline, onGoOnline }: {
+  visible: boolean; onStayOffline: () => void; onGoOnline: () => void;
+}) {
+  return (
+    <Modal transparent visible={visible} animationType="fade" statusBarTranslucent>
+      <View style={aw.overlay}>
+        <View style={aw.sheet}>
+          <Text style={aw.emoji}>⚠️</Text>
+          <Text style={aw.title}>Active Job In Progress</Text>
+          <Text style={aw.sub}>
+            You still have an active job assigned to you.{"\n\n"}
+            <Text style={{ color: "#ef4444", fontWeight: "700" }}>
+              Repeated no-shows or abandoned jobs may lead to temporary account suspension.
+            </Text>
+          </Text>
+          <TouchableOpacity style={aw.onlineBtn} onPress={onGoOnline} activeOpacity={0.85}>
+            <Text style={aw.onlineBtnTxt}>Go Online Anyway</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={aw.offlineBtn} onPress={onStayOffline} activeOpacity={0.85}>
+            <Text style={aw.offlineBtnTxt}>Stay Offline</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 // ─── Artisan Dashboard ────────────────────────────────────────────────────────
 function ArtisanDashboard({ artisan, token }: any) {
-  // ✅ FIX: Use safe area insets instead of hardcoded paddingTop: 52
-  // This fixes the APK vs dev server visual difference
   const insets = useSafeAreaInsets();
-
+  const router = useRouter();
   const { refreshArtisanData } = useAuth();
 
-  const [online,         setOnline]         = useState(artisan?.is_online ?? true);
-  const [alerts,         setAlerts]         = useState<any[]>([]);
-  const [refreshing,     setRefreshing]     = useState(false);
-  const [togglingOnline, setTogglingOnline] = useState(false);
-  const [pendingJob,     setPendingJob]     = useState<any | null>(null);
-  const [acceptedInfo,   setAcceptedInfo]   = useState<any | null>(null);
-  const [showBell,       setShowBell]       = useState(false);
-  const [activeSnooze,   setActiveSnooze]   = useState<number | null>(null);
+  const [online,           setOnline]           = useState<boolean>(
+    artisan?.availability_toggle === 1 || artisan?.availability_toggle === true
+  );
+  const [alerts,           setAlerts]           = useState<any[]>([]);
+  const [refreshing,       setRefreshing]       = useState(false);
+  const [togglingOnline,   setTogglingOnline]   = useState(false);
+  const [pendingJob,       setPendingJob]       = useState<any | null>(null);
+  const [acceptedInfo,     setAcceptedInfo]     = useState<any | null>(null);
+  const [showBell,         setShowBell]         = useState(false);
+  const [showSupportMenu,  setShowSupportMenu]  = useState(false);
+  const [activeSnooze,     setActiveSnooze]     = useState<number | null>(null);
+  const [showActiveJobWarn, setShowActiveJobWarn] = useState(false);
 
-  const socketRef    = useRef<any>(null);
   const beepInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const snoozeTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seenJobIds   = useRef<Set<string>>(new Set());
@@ -251,14 +354,8 @@ function ArtisanDashboard({ artisan, token }: any) {
 
   useEffect(() => {
     if (!artisan?.id) return;
-    const socket = socketIO(SOCKET_URL, { transports: ["websocket"], reconnectionAttempts: 10, reconnectionDelay: 2000 });
-    socketRef.current = socket;
 
-    socket.on("connect", () => {
-      if (artisan?.id) socket.emit("artisan_online", artisan.id);
-    });
-
-    socket.on("job_alert", (job: any) => {
+    const unsubJobAlert = socketService.onJobAlert((job: any) => {
       const jid = String(job.job_id || job.id);
       if (seenJobIds.current.has(jid)) return;
       seenJobIds.current.add(jid);
@@ -267,20 +364,14 @@ function ArtisanDashboard({ artisan, token }: any) {
       setAlerts(prev => [{ ...job, id: jid, status: "pending" }, ...prev]);
     });
 
-    socket.on("job_taken",     () => { stopBeep(); setPendingJob(null); });
-    socket.on("auto_offlined", () => { setOnline(false); });
-
     fetchAlerts();
-
     setupPushNotifications(token).catch(() => {});
-    const removeSub = setupNotificationListeners((jobId) => {
-      fetchAlerts();
-    });
+    const removeSub = setupNotificationListeners((_jobId: any) => { fetchAlerts(); });
 
     return () => {
+      unsubJobAlert();
       removeSub();
       stopBeep();
-      socket.disconnect();
       if (snoozeTimer.current) clearTimeout(snoozeTimer.current);
     };
   }, []);
@@ -313,6 +404,15 @@ function ArtisanDashboard({ artisan, token }: any) {
           phone:      data.client?.phone     || data.phone       || "",
           jobTitle:   pendingJob.category    || pendingJob.title || "Job",
         });
+        setOnline(false);
+        setActiveSnooze(null);
+        socketService.emitToggle(artisan.id, 0);
+        fetch(`${API}/artisan/availability`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ is_online: false }),
+        }).catch(() => {});
+        AsyncStorage.setItem("zuno_active_job", String(jobId)).catch(() => {});
         fetchAlerts();
       }
     } catch {}
@@ -322,13 +422,19 @@ function ArtisanDashboard({ artisan, token }: any) {
   const handleDecline = () => { stopBeep(); setPendingJob(null); };
 
   const toggleOnline = async (val: boolean) => {
+    if (val) {
+      const activeJob = await AsyncStorage.getItem("zuno_active_job").catch(() => null);
+      if (activeJob) { setShowActiveJobWarn(true); return; }
+    }
+    await _doToggleOnline(val);
+  };
+
+  const _doToggleOnline = async (val: boolean) => {
     setOnline(val);
     setActiveSnooze(null);
     if (snoozeTimer.current) { clearTimeout(snoozeTimer.current); snoozeTimer.current = null; }
     setTogglingOnline(true);
-    if (socketRef.current?.connected) {
-      socketRef.current.emit("toggle_availability", { artisan_id: artisan.id, status: val ? 1 : 0 });
-    }
+    socketService.emitToggle(artisan.id, val ? 1 : 0);
     try {
       await fetch(`${API}/artisan/availability`, {
         method: "PUT",
@@ -341,26 +447,19 @@ function ArtisanDashboard({ artisan, token }: any) {
 
   const snooze = (hours: number) => {
     if (snoozeTimer.current) clearTimeout(snoozeTimer.current);
-    if (hours === 0) { toggleOnline(false); setActiveSnooze(null); return; }
-
+    if (hours === 0) { _doToggleOnline(false); setActiveSnooze(null); return; }
     setOnline(false);
     setActiveSnooze(hours);
-
-    if (socketRef.current?.connected) {
-      socketRef.current.emit("toggle_availability", { artisan_id: artisan.id, status: 0 });
-    }
+    socketService.emitToggle(artisan.id, 0);
     fetch(`${API}/artisan/availability`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ is_online: false }),
     }).catch(() => {});
-
     snoozeTimer.current = setTimeout(() => {
       setOnline(true);
       setActiveSnooze(null);
-      if (socketRef.current?.connected) {
-        socketRef.current.emit("toggle_availability", { artisan_id: artisan.id, status: 1 });
-      }
+      socketService.emitToggle(artisan.id, 1);
       fetch(`${API}/artisan/availability`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -375,23 +474,34 @@ function ArtisanDashboard({ artisan, token }: any) {
     setRefreshing(false);
   };
 
-  const photoUri    = artisan?.profile_photo || artisan?.photo || null;
-  const unreadCount = alerts.filter((a: any) => a.status === "pending" || !a.read).length;
-
-  // ✅ FIX: paddingTop now uses real device safe area, not a hardcoded guess
+  const photoUri      = artisan?.profile_photo || artisan?.photo || null;
+  const unreadCount   = alerts.filter((a: any) => a.status === "pending" || !a.read).length;
   const topBarPadding = insets.top + 12;
 
   return (
     <View style={d.root}>
       <StatusBar barStyle="light-content" backgroundColor="#f97316" translucent />
-
       {pendingJob && <JobAlertPopup job={pendingJob} onAccept={handleAccept} onDecline={handleDecline} />}
       {showBell   && <NotificationBell alerts={alerts} onClose={() => setShowBell(false)} />}
-
-      {/* ✅ FIX: paddingTop uses insets.top — works correctly in both APK and dev */}
+      <SupportMenu visible={showSupportMenu} onClose={() => setShowSupportMenu(false)} onLiveChat={() => router.push("/support")} />
+      <ActiveJobWarningModal
+        visible={showActiveJobWarn}
+        onStayOffline={() => setShowActiveJobWarn(false)}
+        onGoOnline={() => {
+          setShowActiveJobWarn(false);
+          AsyncStorage.removeItem("zuno_active_job").catch(() => {});
+          _doToggleOnline(true);
+        }}
+      />
       <View style={[d.topBar, { paddingTop: topBarPadding }]}>
-        <Text style={d.topBarBrand}>Zuno</Text>
-        <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+        <View style={d.topBarLeft}>
+          <Text style={d.topBarBrand}>Zuno</Text>
+          <TouchableOpacity style={d.supportBtn} onPress={() => setShowSupportMenu(true)} activeOpacity={0.75}>
+            <Ionicons name="chatbubble-ellipses" size={18} color="#f97316" />
+            <Text style={d.supportBtnTxt}>Support ▾</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={d.topBarRight}>
           <TouchableOpacity style={d.bellBox} onPress={() => setShowBell(true)}>
             <Ionicons name="notifications-outline" size={22} color="#fff" />
             {unreadCount > 0 && (
@@ -408,12 +518,10 @@ function ArtisanDashboard({ artisan, token }: any) {
           </View>
         </View>
       </View>
-
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#f97316" />}>
-
         {acceptedInfo && (
           <AcceptedJobCard
             clientName={acceptedInfo.clientName}
@@ -422,8 +530,6 @@ function ArtisanDashboard({ artisan, token }: any) {
             onDismiss={() => setAcceptedInfo(null)}
           />
         )}
-
-        {/* Greet card */}
         <View style={d.greetCard}>
           <View style={{ flex: 1 }}>
             <Text style={d.greetSmall}>Good day,</Text>
@@ -438,18 +544,10 @@ function ArtisanDashboard({ artisan, token }: any) {
             }
           </View>
         </View>
-
-        {/* Availability */}
         <View style={d.card}>
           <View style={d.cardRow}>
             <Text style={d.cardTitle}>Availability Status</Text>
-            <Switch
-              value={online}
-              onValueChange={toggleOnline}
-              trackColor={{ false: "#333", true: "#22c55e" }}
-              thumbColor="#fff"
-              disabled={togglingOnline}
-            />
+            <Switch value={online} onValueChange={toggleOnline} trackColor={{ false: "#333", true: "#22c55e" }} thumbColor="#fff" disabled={togglingOnline} />
           </View>
           <View style={[d.statusBadge, { backgroundColor: online ? "rgba(34,197,94,0.12)" : "rgba(100,100,100,0.12)" }]}>
             <View style={[d.statusDot, { backgroundColor: online ? "#22c55e" : "#666" }]} />
@@ -461,17 +559,12 @@ function ArtisanDashboard({ artisan, token }: any) {
           </View>
           <View style={d.snoozeRow}>
             {[{ label: "⏸ Snooze 1hr", hrs: 1 }, { label: "⏸ Snooze 3hrs", hrs: 3 }, { label: "⏺ Go Offline", hrs: 0 }].map(({ label, hrs }) => (
-              <TouchableOpacity
-                key={hrs}
-                style={[d.snoozeBtn, activeSnooze === hrs && hrs > 0 && d.snoozeBtnActive]}
-                onPress={() => snooze(hrs)}>
+              <TouchableOpacity key={hrs} style={[d.snoozeBtn, activeSnooze === hrs && hrs > 0 && d.snoozeBtnActive]} onPress={() => snooze(hrs)}>
                 <Text style={[d.snoozeTxt, activeSnooze === hrs && hrs > 0 && d.snoozeTxtActive]}>{label}</Text>
               </TouchableOpacity>
             ))}
           </View>
         </View>
-
-        {/* Stats */}
         <View style={d.statsRow}>
           {[
             { num: artisan?.jobs_completed ?? "0",   lbl: "Jobs\nCompleted", color: "#f97316" },
@@ -484,8 +577,6 @@ function ArtisanDashboard({ artisan, token }: any) {
             </View>
           ))}
         </View>
-
-        {/* Plan badge */}
         {artisan?.subscription_plan && artisan.subscription_plan !== "basic" ? (
           <View style={d.planBadgeCard}>
             <Text style={d.planBadgeEmoji}>{artisan.subscription_plan === "premium" ? "🌟" : "🏆"}</Text>
@@ -505,8 +596,6 @@ function ArtisanDashboard({ artisan, token }: any) {
             </TouchableOpacity>
           </View>
         )}
-
-        {/* Recent Job Alerts */}
         <View style={d.section}>
           <View style={d.sectionRow}>
             <Text style={d.sectionTitle}>Recent Job Alerts</Text>
@@ -529,7 +618,6 @@ function ArtisanDashboard({ artisan, token }: any) {
             </View>
           ))}
         </View>
-
       </ScrollView>
     </View>
   );
@@ -537,40 +625,134 @@ function ArtisanDashboard({ artisan, token }: any) {
 
 // ─── Main Artisan Screen ──────────────────────────────────────────────────────
 export default function ArtisanScreen() {
-  const { loginArtisan, logoutArtisan, artisanToken, artisanData } = useAuth();
-  const [tab,       setTab]       = useState<"register" | "login">("register");
-  const [form,      setForm]      = useState({ name: "", phone: "", email: "", skill: "", lga: "", password: "" });
-  const [loginForm, setLoginForm] = useState({ email: "", password: "" });
-  const [loading,   setLoading]   = useState(false);
-  const [message,   setMessage]   = useState("");
-  const [msgOk,     setMsgOk]     = useState(true);
-  const [showSkill, setShowSkill] = useState(false);
-  const [showLga,   setShowLga]   = useState(false);
+  const { loginArtisan, artisanToken, artisanData } = useAuth();
+  const [tab,           setTab]           = useState<"register" | "login">("register");
+  const [regStep,       setRegStep]       = useState<1 | 2 | 3>(1);
+  const [form,          setForm]          = useState({ name: "", phone: "", email: "", skill: "", lga: "", password: "" });
+  const [loginForm,     setLoginForm]     = useState({ email: "", password: "" });
+  const [loading,       setLoading]       = useState(false);
+  const [message,       setMessage]       = useState("");
+  const [msgOk,         setMsgOk]         = useState(true);
+  const [showSkill,     setShowSkill]     = useState(false);
+  const [showLga,       setShowLga]       = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [profilePhoto,  setProfilePhoto]  = useState<any>(null);
+  const [workPhotos,    setWorkPhotos]    = useState<any[]>([]);
 
   if (artisanToken) {
     return <ArtisanDashboard artisan={artisanData} token={artisanToken} />;
   }
 
-  const handleRegister = async () => {
-    if (!form.name || !form.phone || !form.skill || !form.lga) {
+  // ── Step 1 → Step 2 ──────────────────────────────────────────────────────
+  const goToStep2 = () => {
+    if (!form.name || !form.phone || !form.email || !form.skill || !form.lga || !form.password) {
       setMessage("Please fill all required fields."); setMsgOk(false); return;
+    }
+    if (form.password.length < 6) {
+      setMessage("Password must be at least 6 characters."); setMsgOk(false); return;
+    }
+    if (!termsAccepted) {
+      setMessage("Please agree to the Terms of Use and Privacy Policy."); setMsgOk(false); return;
+    }
+    setMessage(""); setRegStep(2);
+  };
+
+  // ── Step 2 → Step 3 ──────────────────────────────────────────────────────
+  const goToStep3 = () => {
+    if (!profilePhoto) {
+      setMessage("Please upload your profile photo."); setMsgOk(false); return;
+    }
+    setMessage(""); setRegStep(3);
+  };
+
+  // ── Pick profile photo ────────────────────────────────────────────────────
+  const pickProfilePhoto = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") { setMessage("Camera roll permission needed."); setMsgOk(false); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true, aspect: [1, 1], quality: 0.8,
+    });
+    if (!result.canceled && result.assets[0]) {
+      setProfilePhoto(result.assets[0]);
+      setMessage("");
+    }
+  };
+
+  // ── Pick work photos ──────────────────────────────────────────────────────
+  const pickWorkPhotos = async () => {
+    if (workPhotos.length >= 10) return;
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") { setMessage("Camera roll permission needed."); setMsgOk(false); return; }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsMultipleSelection: true, quality: 0.8,
+    });
+    if (!result.canceled) {
+      const remaining = 10 - workPhotos.length;
+      setWorkPhotos(prev => [...prev, ...result.assets.slice(0, remaining)]);
+    }
+  };
+
+  // ── Submit registration ───────────────────────────────────────────────────
+  const handleRegister = async () => {
+    if (workPhotos.length === 0) {
+      setMessage("Please upload at least 1 work photo."); setMsgOk(false); return;
     }
     setLoading(true); setMessage("");
     try {
-      const res  = await fetch(`${API}/artisan/register`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const formData = new FormData();
+      formData.append("full_name", form.name);
+      formData.append("phone",     form.phone);
+      formData.append("email",     form.email);
+      formData.append("password",  form.password);
+      formData.append("category",  form.skill);
+      formData.append("lga",       form.lga);
+
+      if (profilePhoto) {
+        const ext = profilePhoto.uri.split(".").pop() || "jpg";
+        formData.append("profile_photo", { uri: profilePhoto.uri, name: `profile.${ext}`, type: `image/${ext}` } as any);
+      }
+      workPhotos.forEach((photo, i) => {
+        const ext = photo.uri.split(".").pop() || "jpg";
+        formData.append("work_photos", { uri: photo.uri, name: `work_${i}.${ext}`, type: `image/${ext}` } as any);
+      });
+
+      const res  = await fetch(`${API}/artisan/register`, { method: "POST", body: formData });
       const data = await res.json();
-      setMessage(data.message || "Account created! Please login."); setMsgOk(true); setTab("login");
-    } catch { setMessage("Could not connect. Check your internet."); setMsgOk(false); }
+
+      if (data.success) {
+        setMessage(data.message || "Account created! Please login.");
+        setMsgOk(true);
+        setTab("login");
+        setRegStep(1);
+        setProfilePhoto(null);
+        setWorkPhotos([]);
+        setForm({ name: "", phone: "", email: "", skill: "", lga: "", password: "" });
+        setTermsAccepted(false);
+      } else {
+        setMessage(data.message || "Registration failed. Please try again.");
+        setMsgOk(false);
+      }
+    } catch {
+      setMessage("Could not connect. Check your internet.");
+      setMsgOk(false);
+    }
     setLoading(false);
   };
 
+  // ── Login ─────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
     if (!loginForm.email || !loginForm.password) {
       setMessage("Please enter email and password."); setMsgOk(false); return;
     }
     setLoading(true); setMessage("");
     try {
-      const res  = await fetch(`${API}/artisan/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(loginForm) });
+      const res  = await fetch(`${API}/artisan/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(loginForm),
+      });
       const data = await res.json();
       if (data.success && data.token) { loginArtisan(data.token, data.artisan); }
       else { setMessage(data.message || "Login failed."); setMsgOk(false); }
@@ -578,6 +760,7 @@ export default function ArtisanScreen() {
     setLoading(false);
   };
 
+  // ── Picker modal (skill / LGA) ────────────────────────────────────────────
   const PickerModal = ({ visible, items, onSelect, onClose }: any) => (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={s.overlay}>
@@ -598,75 +781,207 @@ export default function ArtisanScreen() {
     </Modal>
   );
 
+  // ── Step indicator ────────────────────────────────────────────────────────
+  const StepBar = () => (
+    <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 24 }}>
+      {([1, 2, 3] as const).map((n, idx) => (
+        <View key={n} style={{ flexDirection: "row", alignItems: "center", flex: n < 3 ? 1 : undefined }}>
+          <View style={{ alignItems: "center" }}>
+            <View style={{
+              width: 30, height: 30, borderRadius: 15,
+              backgroundColor: regStep >= n ? "#f97316" : "#222",
+              borderWidth: 2, borderColor: regStep >= n ? "#f97316" : "#444",
+              alignItems: "center", justifyContent: "center",
+            }}>
+              <Text style={{ color: regStep > n ? "#fff" : regStep === n ? "#fff" : "#555", fontSize: 12, fontWeight: "800" }}>
+                {regStep > n ? "✓" : String(n)}
+              </Text>
+            </View>
+            <Text style={{ color: regStep >= n ? "#f97316" : "#555", fontSize: 10, fontWeight: "700", marginTop: 3 }}>
+              {n === 1 ? "Info" : n === 2 ? "Photo" : "Work"}
+            </Text>
+          </View>
+          {n < 3 && (
+            <View style={{ flex: 1, height: 2, backgroundColor: regStep > n ? "#f97316" : "#333", marginHorizontal: 6, marginBottom: 14 }} />
+          )}
+        </View>
+      ))}
+    </View>
+  );
+
   return (
     <View style={s.root}>
       <StatusBar barStyle="light-content" />
       <PickerModal visible={showSkill} items={SKILLS} onSelect={(v: string) => setForm({ ...form, skill: v })} onClose={() => setShowSkill(false)} />
       <PickerModal visible={showLga}   items={LGAS}   onSelect={(v: string) => setForm({ ...form, lga: v })}   onClose={() => setShowLga(false)} />
+
       <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         <View style={s.header}>
           <View style={s.headerIcon}><Ionicons name="construct" size={28} color="#fff" /></View>
           <Text style={s.headerTitle}>Artisan Portal</Text>
           <Text style={s.headerSub}>Register or login to your artisan account</Text>
         </View>
+
         <View style={s.tabRow}>
           {(["register", "login"] as const).map(t => (
-            <TouchableOpacity key={t} style={[s.tab, tab === t && s.tabActive]} onPress={() => { setTab(t); setMessage(""); }}>
+            <TouchableOpacity key={t} style={[s.tab, tab === t && s.tabActive]} onPress={() => { setTab(t); setMessage(""); setRegStep(1); }}>
               <Text style={[s.tabTxt, tab === t && s.tabTxtActive]}>{t === "register" ? "Register" : "Login"}</Text>
             </TouchableOpacity>
           ))}
         </View>
+
         <View style={s.form}>
-          {tab === "register" ? (
+
+          {/* ══════════════ REGISTER TAB ══════════════ */}
+          {tab === "register" && (
             <>
-              <View style={s.row2}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.fieldLabel}>FULL NAME</Text>
-                  <TextInput style={s.input} placeholder="Your full name" placeholderTextColor="#aaa" value={form.name} onChangeText={v => setForm({ ...form, name: v })} />
-                </View>
-                <View style={{ width: 12 }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.fieldLabel}>PHONE</Text>
-                  <TextInput style={s.input} placeholder="08012345678" placeholderTextColor="#aaa" keyboardType="phone-pad" value={form.phone} onChangeText={v => setForm({ ...form, phone: v })} />
-                </View>
-              </View>
-              <Text style={s.fieldLabel}>EMAIL</Text>
-              <TextInput style={s.input} placeholder="your@email.com" placeholderTextColor="#aaa" keyboardType="email-address" autoCapitalize="none" value={form.email} onChangeText={v => setForm({ ...form, email: v })} />
-              <View style={s.row2}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.fieldLabel}>YOUR SKILL</Text>
-                  <TouchableOpacity style={s.dropdown} onPress={() => setShowSkill(true)}>
-                    <Text style={form.skill ? s.dropVal : s.dropPh}>{form.skill || "Select skill"}</Text>
-                    <Ionicons name="chevron-down" size={18} color="#888" />
+              <StepBar />
+
+              {/* ── STEP 1: Basic Info ── */}
+              {regStep === 1 && (
+                <>
+                  <View style={s.row2}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.fieldLabel}>FULL NAME</Text>
+                      <TextInput style={s.input} placeholder="Your full name" placeholderTextColor="#aaa" value={form.name} onChangeText={v => setForm({ ...form, name: v })} />
+                    </View>
+                    <View style={{ width: 12 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.fieldLabel}>PHONE</Text>
+                      <TextInput style={s.input} placeholder="08012345678" placeholderTextColor="#aaa" keyboardType="phone-pad" value={form.phone} onChangeText={v => setForm({ ...form, phone: v })} />
+                    </View>
+                  </View>
+                  <Text style={s.fieldLabel}>EMAIL</Text>
+                  <TextInput style={s.input} placeholder="your@email.com" placeholderTextColor="#aaa" keyboardType="email-address" autoCapitalize="none" value={form.email} onChangeText={v => setForm({ ...form, email: v })} />
+                  <View style={s.row2}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.fieldLabel}>YOUR SKILL</Text>
+                      <TouchableOpacity style={s.dropdown} onPress={() => setShowSkill(true)}>
+                        <Text style={form.skill ? s.dropVal : s.dropPh}>{form.skill || "Select skill"}</Text>
+                        <Ionicons name="chevron-down" size={18} color="#888" />
+                      </TouchableOpacity>
+                    </View>
+                    <View style={{ width: 12 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.fieldLabel}>YOUR LGA</Text>
+                      <TouchableOpacity style={s.dropdown} onPress={() => setShowLga(true)}>
+                        <Text style={form.lga ? s.dropVal : s.dropPh}>{form.lga || "Select LGA"}</Text>
+                        <Ionicons name="chevron-down" size={18} color="#888" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  <Text style={s.fieldLabel}>PASSWORD</Text>
+                  <TextInput style={s.input} placeholder="Password (min 6 characters)" placeholderTextColor="#aaa" secureTextEntry value={form.password} onChangeText={v => setForm({ ...form, password: v })} />
+                  <TouchableOpacity style={s.termsRow} onPress={() => setTermsAccepted(!termsAccepted)} activeOpacity={0.8}>
+                    <View style={[s.checkbox, termsAccepted && s.checkboxChecked]}>
+                      {termsAccepted && <Text style={s.checkmark}>✓</Text>}
+                    </View>
+                    <Text style={s.termsTxt}>
+                      I agree to Zuno's{" "}
+                      <Text style={s.termsLink} onPress={() => Linking.openURL("https://zuno.ng/terms")}>Terms of Use</Text>
+                      {" "}and{" "}
+                      <Text style={s.termsLink} onPress={() => Linking.openURL("https://zuno.ng/privacy-policy")}>Privacy Policy</Text>
+                    </Text>
                   </TouchableOpacity>
-                </View>
-                <View style={{ width: 12 }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.fieldLabel}>YOUR LGA</Text>
-                  <TouchableOpacity style={s.dropdown} onPress={() => setShowLga(true)}>
-                    <Text style={form.lga ? s.dropVal : s.dropPh}>{form.lga || "Select LGA"}</Text>
-                    <Ionicons name="chevron-down" size={18} color="#888" />
+                  {!!message && <Text style={[s.msg, { color: msgOk ? "#22c55e" : "#ef4444" }]}>{message}</Text>}
+                  <TouchableOpacity style={s.btnOrange} onPress={goToStep2} activeOpacity={0.85}>
+                    <Text style={s.btnTxt}>Continue → Add Photo</Text>
                   </TouchableOpacity>
-                </View>
-              </View>
-              <Text style={s.fieldLabel}>PASSWORD</Text>
-              <TextInput style={s.input} placeholder="Password" placeholderTextColor="#aaa" secureTextEntry value={form.password} onChangeText={v => setForm({ ...form, password: v })} />
-              {!!message && <Text style={[s.msg, { color: msgOk ? "#22c55e" : "#ef4444" }]}>{message}</Text>}
-              <TouchableOpacity style={s.btnOrange} onPress={handleRegister} disabled={loading}>
-                {loading ? <ActivityIndicator color="#fff" /> : <Text style={s.btnTxt}>Create Account →</Text>}
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => { setTab("login"); setMessage(""); }}>
-                <Text style={s.switchTxt}>Already have an account? <Text style={{ color: "#f97316" }}>Login here</Text></Text>
-              </TouchableOpacity>
+                  <TouchableOpacity onPress={() => { setTab("login"); setMessage(""); }}>
+                    <Text style={s.switchTxt}>Already have an account? <Text style={{ color: "#f97316" }}>Login here</Text></Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
+              {/* ── STEP 2: Profile Photo ── */}
+              {regStep === 2 && (
+                <>
+                  <Text style={{ color: "#fff", fontSize: 17, fontWeight: "800", textAlign: "center", marginBottom: 6 }}>
+                    Profile Photo <Text style={{ color: "#f97316" }}>★ Required</Text>
+                  </Text>
+                  <Text style={{ color: "#888", fontSize: 13, textAlign: "center", marginBottom: 20, lineHeight: 20 }}>
+                    Clients trust artisans with real photos. Use a clear face photo.
+                  </Text>
+                  <TouchableOpacity
+                    onPress={pickProfilePhoto}
+                    activeOpacity={0.8}
+                    style={{ borderWidth: 2, borderColor: "rgba(249,115,22,0.5)", borderStyle: "dashed", borderRadius: 16, padding: 28, alignItems: "center", backgroundColor: "rgba(249,115,22,0.03)", marginBottom: 16 }}>
+                    {profilePhoto ? (
+                      <>
+                        <Image source={{ uri: profilePhoto.uri }} style={{ width: 100, height: 100, borderRadius: 50, borderWidth: 3, borderColor: "#f97316", marginBottom: 10 }} />
+                        <Text style={{ color: "#22c55e", fontWeight: "700", fontSize: 14 }}>✅ Photo selected!</Text>
+                        <Text style={{ color: "#888", fontSize: 12, marginTop: 4 }}>Tap to change</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={{ fontSize: 52, marginBottom: 10 }}>📸</Text>
+                        <Text style={{ color: "#f97316", fontWeight: "700", fontSize: 15 }}>Tap to upload your photo</Text>
+                        <Text style={{ color: "#888", fontSize: 12, marginTop: 6 }}>JPG or PNG, max 5MB</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                  {!!message && <Text style={[s.msg, { color: msgOk ? "#22c55e" : "#ef4444" }]}>{message}</Text>}
+                  <TouchableOpacity style={s.btnOrange} onPress={goToStep3} activeOpacity={0.85}>
+                    <Text style={s.btnTxt}>Continue → Add Work Photos</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.btnBack} onPress={() => { setRegStep(1); setMessage(""); }} activeOpacity={0.85}>
+                    <Text style={s.btnBackTxt}>← Back</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+
+              {/* ── STEP 3: Work Photos ── */}
+              {regStep === 3 && (
+                <>
+                  <Text style={{ color: "#fff", fontSize: 17, fontWeight: "800", textAlign: "center", marginBottom: 6 }}>
+                    Work Photos <Text style={{ color: "#f97316" }}>★ Required</Text>
+                  </Text>
+                  <Text style={{ color: "#888", fontSize: 13, textAlign: "center", marginBottom: 20, lineHeight: 20 }}>
+                    Upload at least 1 photo of past work. More photos = more trust = more clients!
+                  </Text>
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                    {workPhotos.map((photo, i) => (
+                      <View key={i} style={{ width: 90, height: 90, borderRadius: 10, overflow: "hidden" }}>
+                        <Image source={{ uri: photo.uri }} style={{ width: 90, height: 90 }} />
+                        <TouchableOpacity
+                          onPress={() => setWorkPhotos(prev => prev.filter((_, idx) => idx !== i))}
+                          style={{ position: "absolute", top: 3, right: 3, backgroundColor: "rgba(0,0,0,0.75)", borderRadius: 10, width: 22, height: 22, alignItems: "center", justifyContent: "center" }}>
+                          <Text style={{ color: "#fff", fontSize: 12, fontWeight: "800" }}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                    {workPhotos.length < 10 && (
+                      <TouchableOpacity
+                        onPress={pickWorkPhotos}
+                        activeOpacity={0.8}
+                        style={{ width: 90, height: 90, borderRadius: 10, borderWidth: 2, borderColor: "rgba(249,115,22,0.4)", borderStyle: "dashed", backgroundColor: "rgba(249,115,22,0.03)", alignItems: "center", justifyContent: "center" }}>
+                        <Text style={{ fontSize: 28, color: "#f97316" }}>+</Text>
+                        <Text style={{ color: "#f97316", fontSize: 11, marginTop: 2 }}>Add Photos</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  <Text style={{ color: "#888", fontSize: 12, textAlign: "right", marginBottom: 12 }}>{workPhotos.length} / 10 photos</Text>
+                  {!!message && <Text style={[s.msg, { color: msgOk ? "#22c55e" : "#ef4444" }]}>{message}</Text>}
+                  <TouchableOpacity style={s.btnOrange} onPress={handleRegister} disabled={loading} activeOpacity={0.85}>
+                    {loading ? <ActivityIndicator color="#fff" /> : <Text style={s.btnTxt}>Create Account →</Text>}
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.btnBack} onPress={() => { setRegStep(2); setMessage(""); }} activeOpacity={0.85}>
+                    <Text style={s.btnBackTxt}>← Back</Text>
+                  </TouchableOpacity>
+                </>
+              )}
             </>
-          ) : (
+          )}
+
+          {/* ══════════════ LOGIN TAB ══════════════ */}
+          {tab === "login" && (
             <>
               <Text style={s.fieldLabel}>EMAIL</Text>
               <TextInput style={s.input} placeholder="your@email.com" placeholderTextColor="#aaa" keyboardType="email-address" autoCapitalize="none" value={loginForm.email} onChangeText={v => setLoginForm({ ...loginForm, email: v })} />
               <Text style={s.fieldLabel}>PASSWORD</Text>
               <TextInput style={s.input} placeholder="Your password" placeholderTextColor="#aaa" secureTextEntry value={loginForm.password} onChangeText={v => setLoginForm({ ...loginForm, password: v })} />
               {!!message && <Text style={[s.msg, { color: msgOk ? "#22c55e" : "#ef4444" }]}>{message}</Text>}
-              <TouchableOpacity style={s.btnOrange} onPress={handleLogin} disabled={loading}>
+              <TouchableOpacity style={s.btnOrange} onPress={handleLogin} disabled={loading} activeOpacity={0.85}>
                 {loading ? <ActivityIndicator color="#fff" /> : <Text style={s.btnTxt}>Login to Dashboard →</Text>}
               </TouchableOpacity>
               <TouchableOpacity onPress={() => { setTab("register"); setMessage(""); }}>
@@ -674,6 +989,7 @@ export default function ArtisanScreen() {
               </TouchableOpacity>
             </>
           )}
+
         </View>
       </ScrollView>
     </View>
@@ -737,11 +1053,26 @@ const nb = StyleSheet.create({
   itemTime:   { color: "#555", fontSize: 11, marginTop: 2 },
 });
 
+const aw = StyleSheet.create({
+  overlay:      { flex: 1, backgroundColor: "rgba(0,0,0,0.85)", justifyContent: "center", alignItems: "center", padding: 24 },
+  sheet:        { backgroundColor: "#1a1a1a", borderRadius: 24, padding: 28, width: "100%", borderWidth: 1.5, borderColor: "#f97316", alignItems: "center" },
+  emoji:        { fontSize: 52, marginBottom: 14 },
+  title:        { color: "#fff", fontSize: 20, fontWeight: "800", marginBottom: 10, textAlign: "center" },
+  sub:          { color: "#888", fontSize: 14, lineHeight: 22, textAlign: "center", marginBottom: 24 },
+  onlineBtn:    { width: "100%", backgroundColor: "rgba(249,115,22,0.15)", borderRadius: 14, paddingVertical: 16, alignItems: "center", marginBottom: 10, borderWidth: 1.5, borderColor: "#f97316" },
+  onlineBtnTxt: { color: "#f97316", fontWeight: "800", fontSize: 16 },
+  offlineBtn:   { width: "100%", backgroundColor: "rgba(255,255,255,0.06)", borderRadius: 14, paddingVertical: 14, alignItems: "center", borderWidth: 1, borderColor: "#333" },
+  offlineBtnTxt:{ color: "#888", fontWeight: "600", fontSize: 15 },
+});
+
 const d = StyleSheet.create({
   root:           { flex: 1, backgroundColor: "#0a0a0a" },
-  // ✅ paddingTop is set dynamically via insets in the component, not hardcoded
   topBar:         { backgroundColor: "#f97316", flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingBottom: 16 },
-  topBarBrand:    { color: "#fff", fontSize: 22, fontWeight: "bold" },
+  topBarLeft:     { flexDirection: "row", alignItems: "center", gap: 12 },
+  topBarRight:    { flexDirection: "row", alignItems: "center", gap: 12 },
+  topBarBrand:    { color: "#fff", fontSize: 22, fontWeight: "900", letterSpacing: -0.5 },
+  supportBtn:     { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#fff", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 },
+  supportBtnTxt:  { color: "#f97316", fontSize: 13, fontWeight: "800", letterSpacing: 0.2 },
   bellBox:        { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
   bellBadge:      { position: "absolute", top: -2, right: -2, backgroundColor: "#ef4444", borderRadius: 8, minWidth: 16, height: 16, alignItems: "center", justifyContent: "center" },
   bellBadgeTxt:   { color: "#fff", fontSize: 9, fontWeight: "bold" },
@@ -794,32 +1125,51 @@ const d = StyleSheet.create({
   alertTime:      { color: "#555", fontSize: 11 },
 });
 
+const sm = StyleSheet.create({
+  overlay:    { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
+  sheet:      { backgroundColor: "#1a1a1a", borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 36, paddingTop: 12 },
+  sheetHandle:{ width: 40, height: 4, backgroundColor: "#333", borderRadius: 2, alignSelf: "center", marginBottom: 20 },
+  sheetTitle: { color: "#888", fontSize: 11, fontWeight: "800", letterSpacing: 1.5, paddingHorizontal: 20, marginBottom: 8 },
+  item:       { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: "#222", gap: 14 },
+  iconBox:    { width: 42, height: 42, borderRadius: 21, backgroundColor: "rgba(249,115,22,0.12)", alignItems: "center", justifyContent: "center" },
+  itemLabel:  { color: "#fff", fontSize: 15, fontWeight: "700" },
+  itemSub:    { color: "#666", fontSize: 12, marginTop: 2 },
+});
+
 const s = StyleSheet.create({
-  root:         { flex: 1, backgroundColor: "#0a0a0a" },
-  header:       { alignItems: "center", paddingTop: 60, paddingBottom: 24, paddingHorizontal: 20 },
-  headerIcon:   { width: 60, height: 60, borderRadius: 16, backgroundColor: "#f97316", alignItems: "center", justifyContent: "center", marginBottom: 14 },
-  headerTitle:  { color: "#fff", fontSize: 26, fontWeight: "bold" },
-  headerSub:    { color: "#888", fontSize: 14, marginTop: 4, textAlign: "center" },
-  tabRow:       { flexDirection: "row", marginHorizontal: 20, backgroundColor: "#161616", borderRadius: 12, padding: 4, marginBottom: 24, borderWidth: 1, borderColor: "#222" },
-  tab:          { flex: 1, paddingVertical: 13, alignItems: "center", borderRadius: 10 },
-  tabActive:    { backgroundColor: "#f97316" },
-  tabTxt:       { color: "#555", fontWeight: "bold", fontSize: 15 },
-  tabTxtActive: { color: "#fff" },
-  form:         { paddingHorizontal: 20, paddingBottom: 50 },
-  row2:         { flexDirection: "row", marginBottom: 4 },
-  fieldLabel:   { color: "#888", fontSize: 11, fontWeight: "bold", letterSpacing: 0.8, marginBottom: 6, marginTop: 4 },
-  input:        { backgroundColor: "#fff", borderRadius: 12, padding: 14, color: "#000", fontSize: 15, marginBottom: 14, borderWidth: 1, borderColor: "#ddd" },
-  dropdown:     { backgroundColor: "#fff", borderRadius: 12, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: "#ddd", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  dropVal:      { color: "#000", fontSize: 15 },
-  dropPh:       { color: "#aaa", fontSize: 15 },
-  btnOrange:    { backgroundColor: "#f97316", borderRadius: 14, paddingVertical: 17, alignItems: "center", marginTop: 8, marginBottom: 16 },
-  btnTxt:       { color: "#fff", fontWeight: "bold", fontSize: 16 },
-  switchTxt:    { color: "#888", textAlign: "center", fontSize: 14 },
-  msg:          { textAlign: "center", marginBottom: 12, fontSize: 14 },
-  overlay:      { flex: 1, backgroundColor: "rgba(0,0,0,0.78)", justifyContent: "flex-end" },
-  sheet:        { backgroundColor: "#161616", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "70%", paddingBottom: 30 },
-  sheetHdr:     { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderBottomColor: "#222" },
-  sheetHdrTxt:  { color: "#fff", fontSize: 16, fontWeight: "bold" },
-  sheetItem:    { padding: 16, borderBottomWidth: 1, borderBottomColor: "#1e1e1e" },
-  sheetItemTxt: { color: "#fff", fontSize: 15 },
+  root:            { flex: 1, backgroundColor: "#0a0a0a" },
+  header:          { alignItems: "center", paddingTop: 60, paddingBottom: 24, paddingHorizontal: 20 },
+  headerIcon:      { width: 60, height: 60, borderRadius: 16, backgroundColor: "#f97316", alignItems: "center", justifyContent: "center", marginBottom: 14 },
+  headerTitle:     { color: "#fff", fontSize: 26, fontWeight: "bold" },
+  headerSub:       { color: "#888", fontSize: 14, marginTop: 4, textAlign: "center" },
+  tabRow:          { flexDirection: "row", marginHorizontal: 20, backgroundColor: "#161616", borderRadius: 12, padding: 4, marginBottom: 24, borderWidth: 1, borderColor: "#222" },
+  tab:             { flex: 1, paddingVertical: 13, alignItems: "center", borderRadius: 10 },
+  tabActive:       { backgroundColor: "#f97316" },
+  tabTxt:          { color: "#555", fontWeight: "bold", fontSize: 15 },
+  tabTxtActive:    { color: "#fff" },
+  form:            { paddingHorizontal: 20, paddingBottom: 50 },
+  row2:            { flexDirection: "row", marginBottom: 4 },
+  fieldLabel:      { color: "#888", fontSize: 11, fontWeight: "bold", letterSpacing: 0.8, marginBottom: 6, marginTop: 4 },
+  input:           { backgroundColor: "#fff", borderRadius: 12, padding: 14, color: "#000", fontSize: 15, marginBottom: 14, borderWidth: 1, borderColor: "#ddd" },
+  dropdown:        { backgroundColor: "#fff", borderRadius: 12, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: "#ddd", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  dropVal:         { color: "#000", fontSize: 15 },
+  dropPh:          { color: "#aaa", fontSize: 15 },
+  btnOrange:       { backgroundColor: "#f97316", borderRadius: 14, paddingVertical: 17, alignItems: "center", marginTop: 8, marginBottom: 10 },
+  btnTxt:          { color: "#fff", fontWeight: "bold", fontSize: 16 },
+  btnBack:         { backgroundColor: "transparent", borderRadius: 14, paddingVertical: 15, alignItems: "center", marginBottom: 16, borderWidth: 1, borderColor: "#333" },
+  btnBackTxt:      { color: "#888", fontWeight: "bold", fontSize: 15 },
+  switchTxt:       { color: "#888", textAlign: "center", fontSize: 14 },
+  msg:             { textAlign: "center", marginBottom: 12, fontSize: 14 },
+  overlay:         { flex: 1, backgroundColor: "rgba(0,0,0,0.78)", justifyContent: "flex-end" },
+  sheet:           { backgroundColor: "#161616", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "70%", paddingBottom: 30 },
+  sheetHdr:        { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 20, borderBottomWidth: 1, borderBottomColor: "#222" },
+  sheetHdrTxt:     { color: "#fff", fontSize: 16, fontWeight: "bold" },
+  sheetItem:       { padding: 16, borderBottomWidth: 1, borderBottomColor: "#1e1e1e" },
+  sheetItemTxt:    { color: "#fff", fontSize: 15 },
+  termsRow:        { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 16, padding: 12, backgroundColor: "rgba(249,115,22,0.06)", borderRadius: 12, borderWidth: 1, borderColor: "rgba(249,115,22,0.2)" },
+  checkbox:        { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: "#f97316", backgroundColor: "transparent", alignItems: "center", justifyContent: "center", marginTop: 1, flexShrink: 0 },
+  checkboxChecked: { backgroundColor: "#f97316" },
+  checkmark:       { color: "#fff", fontSize: 14, fontWeight: "900" },
+  termsTxt:        { color: "#ccc", fontSize: 13, lineHeight: 20, flex: 1 },
+  termsLink:       { color: "#f97316", fontWeight: "700" },
 });

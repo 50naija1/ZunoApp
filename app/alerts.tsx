@@ -10,7 +10,8 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { useAuth } from "./context";
+import { useAuth } from "../services/context";
+import { socketService } from "../services/socketService";
 
 const API = "https://zuno.ng/api";
 
@@ -23,8 +24,31 @@ export default function AlertsScreen() {
 
   useEffect(() => {
     fetchAlerts();
-    const interval = setInterval(fetchAlerts, 30000);
-    return () => clearInterval(interval);
+
+    const unsub = socketService.onJobAlert((job: any) => {
+      console.log("[Alerts] Realtime alert received:", job.job_id);
+      setAlerts(prev => {
+        const exists = prev.find(a => String(a.id) === String(job.job_id));
+        if (exists) return prev;
+        return [{
+          id:         job.job_id,
+          title:      job.title || job.category,
+          message:    job.message,
+          lga:        job.lga,
+          budget:     job.budget,
+          type:       "job",
+          read:       false,
+          created_at: new Date().toLocaleTimeString(),
+        }, ...prev];
+      });
+    });
+
+    const interval = setInterval(fetchAlerts, 60000);
+
+    return () => {
+      unsub();
+      clearInterval(interval);
+    };
   }, []);
 
   const fetchAlerts = async () => {
@@ -44,7 +68,6 @@ export default function AlertsScreen() {
     setRefreshing(false);
   };
 
-  // ── Delete single alert — removes from server so refresh won't bring it back
   const deleteAlert = (id: any) => {
     Alert.alert("Delete Alert", "Remove this alert?", [
       { text: "Cancel", style: "cancel" },
@@ -63,7 +86,6 @@ export default function AlertsScreen() {
     ]);
   };
 
-  // ── Clear all — uses /alerts/clear/all to avoid route conflict
   const clearAll = () => {
     Alert.alert("Clear All Alerts", "Remove all your alerts permanently?", [
       { text: "Cancel", style: "cancel" },
@@ -146,9 +168,7 @@ export default function AlertsScreen() {
                   )}
                   <Text style={s.alertTime}>{a.time || a.created_at || ""}</Text>
                 </View>
-                <TouchableOpacity
-                  style={s.deleteBtn}
-                  onPress={() => deleteAlert(a.id)}>
+                <TouchableOpacity style={s.deleteBtn} onPress={() => deleteAlert(a.id)}>
                   <Text style={s.deleteBtnTxt}>✕</Text>
                 </TouchableOpacity>
               </View>
@@ -158,7 +178,7 @@ export default function AlertsScreen() {
 
         {alerts.length > 0 && (
           <View style={s.footer}>
-            <Text style={s.footerTxt}>🔄 Auto-refreshes every 30s · Tap ✕ to delete</Text>
+            <Text style={s.footerTxt}>⚡ Realtime · Tap ✕ to delete</Text>
           </View>
         )}
       </ScrollView>
@@ -167,32 +187,32 @@ export default function AlertsScreen() {
 }
 
 const s = StyleSheet.create({
-  root:        { flex: 1, backgroundColor: "#0d0d0d" },
-  header:      { paddingTop: 56, paddingHorizontal: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: "#1e1e1e", flexDirection: "row", alignItems: "center" },
-  title:       { color: "#fff", fontSize: 22, fontWeight: "900", flex: 1 },
-  headerRight: { flexDirection: "row", alignItems: "center", gap: 8 },
-  badge:       { backgroundColor: "#f97316", borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  badgeTxt:    { color: "#fff", fontSize: 12, fontWeight: "700" },
-  clearBtn:    { backgroundColor: "rgba(239,68,68,0.12)", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "rgba(239,68,68,0.3)" },
-  clearBtnTxt: { color: "#ef4444", fontSize: 12, fontWeight: "700" },
-  center:      { alignItems: "center", paddingTop: 80, paddingHorizontal: 30, gap: 12 },
-  loadingTxt:  { color: "#888", fontSize: 14 },
-  emptyEmoji:  { fontSize: 48 },
-  emptyTitle:  { color: "#fff", fontSize: 18, fontWeight: "800" },
-  emptySub:    { color: "#888", textAlign: "center", lineHeight: 20, fontSize: 14 },
-  cardWrap:    { paddingHorizontal: 16, paddingTop: 10 },
-  card:        { flexDirection: "row", padding: 16, backgroundColor: "#1a1a1a", borderRadius: 14, borderWidth: 1, borderColor: "#2a2a2a", gap: 12, alignItems: "center" },
-  cardUnread:  { borderLeftWidth: 3, borderLeftColor: "#f97316" },
-  cardTop:     { flexDirection: "row", alignItems: "center", marginBottom: 4 },
-  iconBox:     { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
-  iconTxt:     { fontSize: 20 },
-  alertTitle:  { color: "#fff", fontWeight: "700", fontSize: 14, flex: 1 },
-  dot:         { width: 8, height: 8, borderRadius: 4, backgroundColor: "#f97316" },
-  alertMsg:    { color: "#aaa", fontSize: 13, lineHeight: 18, marginBottom: 4 },
-  alertMeta:   { color: "#22c55e", fontSize: 12, marginBottom: 4 },
-  alertTime:   { color: "#555", fontSize: 12 },
-  deleteBtn:   { width: 32, height: 32, borderRadius: 16, backgroundColor: "#ef4444", alignItems: "center", justifyContent: "center" },
-  deleteBtnTxt:{ color: "#fff", fontSize: 14, fontWeight: "900" },
-  footer:      { margin: 16, marginTop: 20, backgroundColor: "#1a1a1a", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#2a2a2a" },
-  footerTxt:   { color: "#555", fontSize: 12, lineHeight: 18, textAlign: "center" },
+  root:         { flex: 1, backgroundColor: "#0d0d0d" },
+  header:       { paddingTop: 56, paddingHorizontal: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: "#1e1e1e", flexDirection: "row", alignItems: "center" },
+  title:        { color: "#fff", fontSize: 22, fontWeight: "900", flex: 1 },
+  headerRight:  { flexDirection: "row", alignItems: "center", gap: 8 },
+  badge:        { backgroundColor: "#f97316", borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  badgeTxt:     { color: "#fff", fontSize: 12, fontWeight: "700" },
+  clearBtn:     { backgroundColor: "rgba(239,68,68,0.12)", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: "rgba(239,68,68,0.3)" },
+  clearBtnTxt:  { color: "#ef4444", fontSize: 12, fontWeight: "700" },
+  center:       { alignItems: "center", paddingTop: 80, paddingHorizontal: 30, gap: 12 },
+  loadingTxt:   { color: "#888", fontSize: 14 },
+  emptyEmoji:   { fontSize: 48 },
+  emptyTitle:   { color: "#fff", fontSize: 18, fontWeight: "800" },
+  emptySub:     { color: "#888", textAlign: "center", lineHeight: 20, fontSize: 14 },
+  cardWrap:     { paddingHorizontal: 16, paddingTop: 10 },
+  card:         { flexDirection: "row", padding: 16, backgroundColor: "#1a1a1a", borderRadius: 14, borderWidth: 1, borderColor: "#2a2a2a", gap: 12, alignItems: "center" },
+  cardUnread:   { borderLeftWidth: 3, borderLeftColor: "#f97316" },
+  cardTop:      { flexDirection: "row", alignItems: "center", marginBottom: 4 },
+  iconBox:      { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  iconTxt:      { fontSize: 20 },
+  alertTitle:   { color: "#fff", fontWeight: "700", fontSize: 14, flex: 1 },
+  dot:          { width: 8, height: 8, borderRadius: 4, backgroundColor: "#f97316" },
+  alertMsg:     { color: "#aaa", fontSize: 13, lineHeight: 18, marginBottom: 4 },
+  alertMeta:    { color: "#22c55e", fontSize: 12, marginBottom: 4 },
+  alertTime:    { color: "#555", fontSize: 12 },
+  deleteBtn:    { width: 32, height: 32, borderRadius: 16, backgroundColor: "#ef4444", alignItems: "center", justifyContent: "center" },
+  deleteBtnTxt: { color: "#fff", fontSize: 14, fontWeight: "900" },
+  footer:       { margin: 16, marginTop: 20, backgroundColor: "#1a1a1a", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#2a2a2a" },
+  footerTxt:    { color: "#555", fontSize: 12, lineHeight: 18, textAlign: "center" },
 });

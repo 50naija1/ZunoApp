@@ -1,5 +1,5 @@
 import { Linking, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { useAuth } from "./context";
+import { useAuth } from "../services/context";
 
 const WHATSAPP_NUMBER = "2349164096900"; // 234 = Nigeria country code
 
